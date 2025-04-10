@@ -23,7 +23,7 @@ summary = success_df.groupby("WeightFunction").agg({
     "Success": "NumSuccesses"
 })
 
-# --- 1. Success Rate Bar Plot (Zoomed with Labels) ---
+# --- 1. Success Rate Bar Plot ---
 plt.figure(figsize=(8, 5))
 success_rate = df.groupby("WeightFunction")["Success"].mean().reset_index()
 success_rate["Success Rate (%)"] = success_rate["Success"] * 100
@@ -31,6 +31,12 @@ success_rate["Success Rate (%)"] = success_rate["Success"] * 100
 barplot = sns.barplot(data=success_rate, x="WeightFunction", y="Success Rate (%)", palette="viridis", hue="WeightFunction", legend=False)
 barplot.set_title("Success Rate by Weight Function")
 barplot.set_ylabel("Success Rate (%)")
+
+for p in barplot.patches:
+    height = p.get_height()
+    barplot.annotate(f'{height:.1f}%', (p.get_x() + p.get_width() / 2., height + 0.5),
+                ha='center', va='bottom', fontsize=10)
+    
 plt.tight_layout()
 plt.savefig("poster_success_rate.png")
 plt.close()
