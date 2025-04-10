@@ -245,7 +245,7 @@ func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel, amount f
     return additive, multiplicative
 }
 
-func EclairWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
+func EclairWeight(ch Channel, model ProbabilityModel, amount float64) (float64, float64) {
     var Pe float64
     if model == Bimodal {
         Pe = LookupBimodalSuccessProbability(ch, amount)
@@ -261,23 +261,24 @@ func EclairWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
 	total := (ch.Fee + ch.HopCost + riskCost) - penalty
     
     // return (ch.Fee + ch.HopCost + riskCost) - ((2000+ch.Amt*500)/1000)*math.Log(Pe) // /1000 to convert from msat to satoshi?
-	return total
+	return total, 1.0
 }
 
 // CLN weight function as per the paper
 // Note: CLN does NOT use success probability like other implementations
-func CLNWeight(ch Channel, amount float64) float64 {
+func CLNWeight(ch Channel, amount float64) (float64, float64) {
     blockPerYear := 52596.0
     riskFactor := 10.0
 	// this capacityBias is success prob in CLN
 	estimateSuccessProb := (ch.Capacity + 1 - amount) / (ch.Capacity + 1)
     capacityBias := -math.Log(estimateSuccessProb)
+	total := (ch.Fee + (amount * ch.CLTV * riskFactor) / (blockPerYear * 100) + 1) * (capacityBias + 1)
     
-    return (ch.Fee + (amount * ch.CLTV * riskFactor) / (blockPerYear * 100) + 1) * (capacityBias + 1)
+    return total, 1.0
 }
 
 // LDK weight function as per the paper
-func LDKWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
+func LDKWeight(ch Channel, model ProbabilityModel, amount float64) (float64, float64) {
 	// Convert amount from sats to msat for penalty calculations
 	amtMsat := amount * 1000.0
 
@@ -316,7 +317,8 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
 	totalPenalty := (basePenalty + antiProbingPenalty + liquidityPenalty + historicPenalty) / 1000.0
 
 	// Final weight
-	return math.Max(ch.Fee, pathHtlcMin/1000.0) + totalPenalty
+	total := math.Max(ch.Fee, pathHtlcMin/1000.0) + totalPenalty
+	return total, 1.0
 }
 
 func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
@@ -478,7 +480,7 @@ func FindBestRoute(graph *Graph, start, end string, amount float64,
 			}
 
 			newProb := probMap[currentNode] * pe
-			
+
 			if newDist < dist[ch.ToNode] {
 				dist[ch.ToNode] = newDist
 				probMap[ch.ToNode] = newProb
@@ -557,20 +559,14 @@ func makeWeightFuncWrapper(
 
 // Eclair wrapper (additive cost only)
 func makeEclairWrapper(
-	weightFunc func(Channel, ProbabilityModel, float64) float64,
+	weightFunc func(Channel, ProbabilityModel, float64) (float64, float64),
 	minSuccessPe float64,
 ) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
 	return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
 		return FindBestRoute(
 			graph, start, end, amount,
 			func(ch Channel, _ float64) (float64, float64) {
-				var pe float64
-				if model == Bimodal {
-					pe = LookupBimodalSuccessProbability(ch, amount)
-				} else {
-					pe = EstimateUniformSuccessProbability(ch, amount)
-				}
-				return weightFunc(ch, model, amount), pe
+				return weightFunc(ch, model, amount)
 			},
 			model,
 			false, // isLND
@@ -582,20 +578,14 @@ func makeEclairWrapper(
 
 // LDK wrapper
 func makeLDKWrapper(
-	weightFunc func(Channel, ProbabilityModel, float64) float64,
+	weightFunc func(Channel, ProbabilityModel, float64) (float64, float64),
 	minSuccessPe float64,
 ) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
 	return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
 		return FindBestRoute(
 			graph, start, end, amount,
 			func(ch Channel, _ float64) (float64, float64) {
-				var pe float64
-				if model == Bimodal {
-					pe = LookupBimodalSuccessProbability(ch, amount)
-				} else {
-					pe = EstimateUniformSuccessProbability(ch, amount)
-				}
-				return weightFunc(ch, model, amount), pe
+				return weightFunc(ch, model, amount)
 			},
 			model,
 			false, // isLND
@@ -611,7 +601,7 @@ func makeCLNWrapper(minSuccessPe float64) func(*Graph, string, string, float64, 
 		path, _, err := FindBestRoute(
 			graph, start, end, amount,
 			func(ch Channel, _ float64) (float64, float64) {
-				return CLNWeight(ch, amount), 1.0 // dummy Pe
+				return CLNWeight(ch, amount) // returns total, 1.0
 			},
 			model,
 			false, // isLND
@@ -777,7 +767,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 100
+    numTests := 250
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }

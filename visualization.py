@@ -13,7 +13,7 @@ plt.figure(figsize=(8, 5))
 success_rate = df.groupby("WeightFunction")["Success"].mean().reset_index()
 success_rate["Success Rate (%)"] = success_rate["Success"] * 100
 
-barplot = sns.barplot(data=success_rate, x="WeightFunction", y="Success Rate (%)", palette="viridis")
+barplot = sns.barplot(data=success_rate, x="WeightFunction", y="Success Rate (%)", palette="viridis", hue="WeightFunction", legend=False)
 barplot.set_ylim(60, 100)
 barplot.set_title("Success Rate by Weight Function")
 barplot.set_ylabel("Success Rate (%)")
@@ -27,7 +27,7 @@ plt.close()
 
 # --- 2. Total Fee Distribution Box Plot ---
 plt.figure(figsize=(12, 6))
-sns.boxplot(data=success_df, x="WeightFunction", y="TotalFee", palette="pastel")
+sns.boxplot(data=success_df, x="WeightFunction", y="TotalFee", palette="pastel", hue="WeightFunction", legend=False)
 plt.yscale("log")
 plt.title("Distribution of Total Fees (Successful Transactions)")
 plt.ylabel("Total Fee (sats, log scale)")
