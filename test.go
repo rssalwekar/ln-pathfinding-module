@@ -211,6 +211,13 @@ func EstimateUniformSuccessProbability(ch Channel, amount float64) float64 {
 	return math.Max((ch.Capacity - amount) / ch.Capacity, 1e-9)
 }
 
+func getSuccessProbability(ch Channel, model ProbabilityModel, amount float64) float64 {
+	if model == Bimodal {
+		return LookupBimodalSuccessProbability(ch, amount)
+	}
+	return EstimateUniformSuccessProbability(ch, amount)
+}
+
 
 type ProbabilityModel string
 
@@ -251,8 +258,8 @@ func EclairWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
     riskCost := amount * ch.CLTV * lockedFundsRisk
 
 	logPe := math.Log(math.Max(Pe, 1e-9))
-	penalty := ((2000 + amount*500) / 1000) * logPe
-	total := (ch.Fee + ch.HopCost + riskCost) - penalty
+	penalty := ((2000 + amount*0.1) / 1000) * logPe
+	total := (ch.Fee + ch.HopCost + riskCost) + penalty
     
     // return (ch.Fee + ch.HopCost + riskCost) - ((2000+ch.Amt*500)/1000)*math.Log(Pe) // /1000 to convert from msat to satoshi?
 	return total
@@ -405,142 +412,202 @@ func LoadCSV(filename string) (*Graph, error) {
 
 // Modified Dijkstra's algorithm
 func FindBestRoute(graph *Graph, start, end string, amount float64,
-    weightFunc func(Channel, float64) (float64, float64),
-    useMultiplicative bool,
-    model ProbabilityModel) ([]Channel, float64, error) {
+	weightFunc func(Channel, float64) (float64, float64),
+	useMultiplicative bool,
+	model ProbabilityModel,
+	isLND bool,
+	minSuccessPe float64,
+) ([]Channel, float64, error) {
 
-    pq := &PriorityQueue{}
-    heap.Init(pq)
+	pq := &PriorityQueue{}
+	heap.Init(pq)
 
-    dist := make(map[string]float64)
-    prev := make(map[string]Channel)
-    path := make(map[string][]Channel)
-    visited := make(map[string]bool)
+	dist := make(map[string]float64)
+	prev := make(map[string]Channel)
+	path := make(map[string][]Channel)
+	visited := make(map[string]bool)
+	probMap := make(map[string]float64) // track cumulative success probability
 
-    for node := range graph.Nodes {
-        dist[node] = math.Inf(1)
-    }
-    dist[start] = 0.0
-    path[start] = []Channel{}
+	for node := range graph.Nodes {
+		dist[node] = math.Inf(1)
+		probMap[node] = 1.0
+	}
+	dist[start] = 0.0
+	path[start] = []Channel{}
+	probMap[start] = 1.0
 
-    heap.Push(pq, &Item{
-        node:         start,
-        additiveCost: 0.0,
-        path:         []Channel{},
-    })
+	heap.Push(pq, &Item{
+		node:         start,
+		additiveCost: 0.0,
+		path:         []Channel{},
+	})
 
-    for pq.Len() > 0 {
-        current := heap.Pop(pq).(*Item)
-        currentNode := current.node
+	for pq.Len() > 0 {
+		current := heap.Pop(pq).(*Item)
+		currentNode := current.node
 
-        if visited[currentNode] {
-            continue
-        }
-        visited[currentNode] = true
+		if visited[currentNode] {
+			continue
+		}
+		visited[currentNode] = true
 
-        if currentNode == end {
-            finalPath := path[end]
-            pathPe := computePathSuccessProbability(finalPath) // Pe now cached
-            return finalPath, pathPe, nil
-        }
+		if currentNode == end {
+			finalPath := path[end]
+			pathPe := computePathSuccessProbability(finalPath, model, amount)
+			if pathPe < minSuccessPe {
+				return nil, 0.0, fmt.Errorf("path Pe %.6f < threshold", pathPe)
+			}
+			return finalPath, pathPe, nil
+		}
 
-        for _, ch := range graph.Nodes[currentNode] {
-            if ch.Capacity < amount {
-                continue
-            }
+		for _, ch := range graph.Nodes[currentNode] {
+			if ch.Capacity < amount {
+				continue
+			}
 
-            additive, multiplicative := weightFunc(ch, amount)
-			pe := multiplicative
-			if !useMultiplicative {
-				ch.PeCache = pe // Save just Pe
+			var weight, _ float64
+			if isLND {
+				currentProb := probMap[currentNode]
+				weight, _ = LNDWeight(ch, currentProb, model, amount)
 			} else {
-				ch.PeCache = 1.0 // LND handles reliability in the cost
-			}
-			cost := additive
-			if useMultiplicative {
-				cost += multiplicative
+				weight, _ = weightFunc(ch, amount)
 			}
 
-            newDist := dist[currentNode] + cost
+			newDist := dist[currentNode] + weight
+			newProb := probMap[currentNode] * getSuccessProbability(ch, model, amount)
 
-            if newDist < dist[ch.ToNode] {
-                dist[ch.ToNode] = newDist
-                prev[ch.ToNode] = ch
+			if newDist < dist[ch.ToNode] {
+				dist[ch.ToNode] = newDist
+				prev[ch.ToNode] = ch
 
-                newPath := make([]Channel, len(path[currentNode]))
-                copy(newPath, path[currentNode])
-                newPath = append(newPath, ch)
-                path[ch.ToNode] = newPath
+				newPath := make([]Channel, len(path[currentNode]))
+				copy(newPath, path[currentNode])
+				newPath = append(newPath, ch)
+				path[ch.ToNode] = newPath
+				probMap[ch.ToNode] = newProb
 
-                heap.Push(pq, &Item{
-                    node:         ch.ToNode,
-                    additiveCost: newDist,
-                    path:         newPath,
-                })
-            }
-        }
-    }
+				heap.Push(pq, &Item{
+					node:         ch.ToNode,
+					additiveCost: newDist,
+					path:         newPath,
+				})
+			}
+		}
+	}
 
-    return nil, 0.0, fmt.Errorf("no path found")
+	return nil, 0.0, fmt.Errorf("no path found")
 }
 
-// helper function for dijkstra
-func computePathSuccessProbability(path []Channel) float64 {
-    pathPe := 1.0
-    for _, ch := range path {
-        pe := ch.PeCache
-        if pe <= 0.0 {
-            return 0.0
-        }
-        pathPe *= pe
-    }
-    return pathPe
+
+// helper function to compute the success probability of a path
+func computePathSuccessProbability(path []Channel, model ProbabilityModel, amount float64) float64 {
+	pathPe := 1.0
+	for _, ch := range path {
+		var pe float64
+		if model == Bimodal {
+			pe = LookupBimodalSuccessProbability(ch, amount)
+		} else {
+			pe = EstimateUniformSuccessProbability(ch, amount)
+		}
+		pe = math.Max(pe, 1e-9)
+		pathPe *= pe
+	}
+	return pathPe
 }
 
+// LND wrapper uses multiplicative cost and dynamic currentProb
+func makeLNDWrapper() func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
+    return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
+        return FindBestRoute(
+            graph, start, end, amount,
+            func(ch Channel, _ float64) (float64, float64) {
+                panic("LND logic must be handled in FindBestRoute directly")
+            },
+            true,     // useMultiplicative
+            model,
+            true,     // isLND
+            1e-3,
+        )
+    }
+}
+
+// General-purpose wrapper for Combined
 func makeWeightFuncWrapper(
     weightFunc func(Channel, float64, ProbabilityModel) (float64, float64),
     useMultiplicative bool,
 ) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
-            return weightFunc(ch, amount, model)
-        }, useMultiplicative, model)
+        return FindBestRoute(
+            graph, start, end, amount,
+            func(ch Channel, _ float64) (float64, float64) {
+                return weightFunc(ch, amount, model)
+            },
+            useMultiplicative,
+            model,
+            false,
+            1e-3,
+        )
     }
 }
 
-func makeEclairWrapper(weightFunc func(Channel, ProbabilityModel, float64) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
+// Eclair wrapper (additive cost only)
+func makeEclairWrapper(
+    weightFunc func(Channel, ProbabilityModel, float64) float64,
+) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
-            var pe float64
-            if model == Bimodal {
-                pe = LookupBimodalSuccessProbability(ch, amount)
-            } else {
-                pe = EstimateUniformSuccessProbability(ch, amount)
-            }
-            return weightFunc(ch, model, amount), pe
-        }, false, model)
+        return FindBestRoute(graph, start, end, amount,
+            func(ch Channel, _ float64) (float64, float64) {
+                var pe float64
+                if model == Bimodal {
+                    pe = LookupBimodalSuccessProbability(ch, amount)
+                } else {
+                    pe = EstimateUniformSuccessProbability(ch, amount)
+                }
+                return weightFunc(ch, model, amount), pe
+            },
+            false,
+            model,
+            false,
+            1e-5,
+        )
     }
 }
 
-func makeLDKWrapper(weightFunc func(Channel, ProbabilityModel, float64) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
+// LDK wrapper
+func makeLDKWrapper(
+    weightFunc func(Channel, ProbabilityModel, float64) float64,
+) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
-            var pe float64
-            if model == Bimodal {
-                pe = LookupBimodalSuccessProbability(ch, amount)
-            } else {
-                pe = EstimateUniformSuccessProbability(ch, amount)
-            }
-            return weightFunc(ch, model, amount), pe
-        }, false, model)
+        return FindBestRoute(graph, start, end, amount,
+            func(ch Channel, _ float64) (float64, float64) {
+                var pe float64
+                if model == Bimodal {
+                    pe = LookupBimodalSuccessProbability(ch, amount)
+                } else {
+                    pe = EstimateUniformSuccessProbability(ch, amount)
+                }
+                return weightFunc(ch, model, amount), pe
+            },
+            false,
+            model,
+            false,
+            1e-3,
+        )
     }
 }
 
+// CLN wrapper – ignores success probability model
 func makeCLNWrapper() func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
-    return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
-            return CLNWeight(ch, amount), 1.0
-        }, false, model)
+    return func(graph *Graph, start, end string, amount float64, _ ProbabilityModel) ([]Channel, float64, error) {
+        return FindBestRoute(graph, start, end, amount,
+            func(ch Channel, _ float64) (float64, float64) {
+                return CLNWeight(ch, amount), 1.0
+            },
+            false,
+            "N/A (capacity bias)",
+            false,
+            1e-3,
+        )
     }
 }
 
@@ -589,8 +656,12 @@ func ComprehensiveTest(graph *Graph, numTests int) {
     r := rand.New(rand.NewSource(time.Now().UnixNano()))
     results := []Result{}
     maxRetries := 1
+	minSuccessPe := 1e-5
 
     for i := 0; i < numTests; i++ {
+		// print test number
+		fmt.Printf("\rRunning test %d/%d...", i+1, numTests)
+
         src, dst := RandomNodes(r, graph)
         if src == dst || src == "" || dst == "" {
             continue
@@ -616,9 +687,7 @@ func ComprehensiveTest(graph *Graph, numTests int) {
                 {"Eclair", makeEclairWrapper(EclairWeight), true},
                 {"CLN", makeCLNWrapper(), false},
                 {"LDK", makeLDKWrapper(LDKWeight), true},
-                {"LND", makeWeightFuncWrapper(func(ch Channel, amt float64, m ProbabilityModel) (float64, float64) {
-                    return LNDWeight(ch, 1.0, m, amt)
-                }, true), true},
+                {"LND", makeLNDWrapper(), true},
             } {
                 modelUsed := model
                 if !testCase.UsesProbabilityModel {
@@ -633,7 +702,7 @@ func ComprehensiveTest(graph *Graph, numTests int) {
 
                 for attempt := 0; attempt < maxRetries; attempt++ {
                     path, pathPe, err = testCase.Func(graph, src, dst, amount, model)
-                    if err == nil && len(path) > 0 {
+                    if err == nil && len(path) > 0 && pathPe >= minSuccessPe {
                         success = true
                         retries = attempt + 1
                         break
@@ -691,7 +760,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 25
+    numTests := 250
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }
