@@ -787,7 +787,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 50
+    numTests := 1000
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }
