@@ -137,6 +137,21 @@ func maxReceivable(graph *Graph, node string) float64 {
 // make s customizable
 // area under curve must equal 1
 // s = cap/10
+var bimodalPeTable = make(map[int]map[int]float64)
+
+func PrecomputeBimodalPeTable() {
+    for capacity := 1000; capacity <= 20_000_000; capacity += 1000 {
+        innerMap := make(map[int]float64)
+        for ratio := 1; ratio <= 100; ratio++ {
+            amt := float64(ratio) / 100.0 * float64(capacity)
+            ch := Channel{Capacity: float64(capacity)}
+            pe := EstimateBimodalSuccessProbability(ch, amt)
+            innerMap[ratio] = pe
+        }
+        bimodalPeTable[capacity] = innerMap
+    }
+}
+
 func EstimateBimodalSuccessProbability(ch Channel, amount float64) float64 {
 	if amount >= ch.Capacity || ch.Capacity == 0 {
 		return 1e-9
@@ -172,6 +187,21 @@ func EstimateBimodalSuccessProbability(ch Channel, amount float64) float64 {
 	return math.Max(pe, 1e-9)
 }
 
+func LookupBimodalSuccessProbability(ch Channel, amount float64) float64 {
+    capKey := int(ch.Capacity / 1000) * 1000
+    ratio := int((amount / ch.Capacity) * 100)
+
+    if capMap, ok := bimodalPeTable[capKey]; ok {
+        if pe, ok2 := capMap[ratio]; ok2 {
+            return math.Max(pe, 1e-9)
+        }
+    }
+
+    // fallback if not found
+    return EstimateBimodalSuccessProbability(ch, amount)
+}
+
+
 // estimate success probability using uniform function
 // pe = (cap - amt) / cap
 func EstimateUniformSuccessProbability(ch Channel, amount float64) float64 {
@@ -195,7 +225,7 @@ const (
 func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel, amount float64) (float64, float64) {
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch, amount)
+        Pe = LookupBimodalSuccessProbability(ch, amount)
     } else {
         Pe = EstimateUniformSuccessProbability(ch, amount)
     }
@@ -212,7 +242,7 @@ func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel, amount f
 func EclairWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch, amount)
+        Pe = LookupBimodalSuccessProbability(ch, amount)
     } else {
         Pe = EstimateUniformSuccessProbability(ch, amount)
     }
@@ -237,7 +267,7 @@ func CLNWeight(ch Channel, amount float64) float64 {
 	estimateSuccessProb := (ch.Capacity + 1 - amount) / (ch.Capacity + 1)
     capacityBias := -math.Log(estimateSuccessProb)
     
-    return (ch.Fee + (ch.Amt * ch.CLTV * riskFactor) / (blockPerYear * 100) + 1) * (capacityBias + 1)
+    return (ch.Fee + (amount * ch.CLTV * riskFactor) / (blockPerYear * 100) + 1) * (capacityBias + 1)
 }
 
 // LDK weight function as per the paper
@@ -265,7 +295,7 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
 	// not using exponential in bimodal; instead is polynomial
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch, amount)
+        Pe = LookupBimodalSuccessProbability(ch, amount)
     } else {
         Pe = EstimateUniformSuccessProbability(ch, amount)
     }
@@ -288,7 +318,7 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
 func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
 	var Pe float64
 	if model == Bimodal {
-		Pe = EstimateBimodalSuccessProbability(ch, amount)
+		Pe = LookupBimodalSuccessProbability(ch, amount)
 	} else {
 		Pe = EstimateUniformSuccessProbability(ch, amount)
 	}
@@ -483,7 +513,7 @@ func makeEclairWrapper(weightFunc func(Channel, ProbabilityModel, float64) float
         return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
             var pe float64
             if model == Bimodal {
-                pe = EstimateBimodalSuccessProbability(ch, amount)
+                pe = LookupBimodalSuccessProbability(ch, amount)
             } else {
                 pe = EstimateUniformSuccessProbability(ch, amount)
             }
@@ -497,7 +527,7 @@ func makeLDKWrapper(weightFunc func(Channel, ProbabilityModel, float64) float64)
         return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
             var pe float64
             if model == Bimodal {
-                pe = EstimateBimodalSuccessProbability(ch, amount)
+                pe = LookupBimodalSuccessProbability(ch, amount)
             } else {
                 pe = EstimateUniformSuccessProbability(ch, amount)
             }
@@ -648,6 +678,9 @@ func ComprehensiveTest(graph *Graph, numTests int) {
 
 
 func main() {
+	fmt.Println("Pre-computing Bimodal Pe Lookup Table...")
+	PrecomputeBimodalPeTable()
+
     fmt.Println("Loading network data...")
     graph, err := LoadCSV("LN_snapshot.csv")
     if err != nil {
