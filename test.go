@@ -111,8 +111,8 @@ func maxSendable(graph *Graph, node string) float64 {
 	maxAmt := 0.0
 	if chans, ok := graph.Nodes[node]; ok {
 		for _, ch := range chans {
-			if ch.Capacity > maxAmt {
-				maxAmt = ch.Capacity
+			if ch.Balance > maxAmt {
+				maxAmt = ch.Balance
 			}
 		}
 	}
@@ -124,8 +124,8 @@ func maxReceivable(graph *Graph, node string) float64 {
 	maxAmt := 0.0
 	for _, chans := range graph.Nodes {
 		for _, ch := range chans {
-			if ch.ToNode == node && ch.Capacity > maxAmt {
-				maxAmt = ch.Capacity
+			if ch.ToNode == node && ch.Balance > maxAmt {
+				maxAmt = ch.Balance
 			}
 		}
 	}

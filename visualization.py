@@ -37,7 +37,7 @@ plt.close()
 
 # --- 2. Fee/Amount Distribution Box Plot ---
 plt.figure(figsize=(12, 6))
-sns.boxplot(data=success_df, x="WeightFunction", y="FeePerSat", palette="pastel", hue="WeightFunction", legend=False)
+sns.boxplot(data=success_df, x="WeightFunction", y="FeePerSat", palette="pastel", hue="WeightFunction", legend=False, showfliers=False)
 plt.title("Distribution of Fee/Amount (Successful Transactions)")
 plt.ylabel("Fee / Amount")
 plt.tight_layout()
