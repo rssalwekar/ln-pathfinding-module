@@ -18,16 +18,17 @@ type Channel struct {
     FromNode    string
     ToNode      string
     Fee         float64
-    FeeBase     float64    // base fee in satoshis
-    FeeRate     float64    // fee rate in ppm
+    FeeBase     float64		// base fee in satoshis
+    FeeRate     float64		// fee rate in ppm
     HopCost     float64
     Amt         float64
     CLTV        float64
     Capacity    float64
-    HtlcMin     float64    // HTLC minimum in satoshis
-    HtlcMax     float64    // HTLC maximum in satoshis
+    HtlcMin     float64		// HTLC minimum in satoshis
+    HtlcMax     float64		// HTLC maximum in satoshis
     SuccessProb float64
 	PeCache		float64
+	Balance 	float64		// spendable balance of the channel
 }
 
 // Graph represents the Lightning Network as an adjacency list
@@ -368,6 +369,9 @@ func LoadCSV(filename string) (*Graph, error) {
 
         // convert fields from string to appropriate data types
         capacity, _ := strconv.ParseFloat(record[5], 64) // satoshis
+
+		// generate random balance between 0 and capacity since snapshot doesn't have it
+		balance := rand.Float64() * capacity
         
         // Convert amount from msat to satoshis
         amountStr := strings.TrimSuffix(record[6], "msat")
@@ -408,6 +412,7 @@ func LoadCSV(filename string) (*Graph, error) {
             HtlcMin:     htlcMin,    // Added for LDK
             HtlcMax:     htlcMax,    // Added for LDK
             SuccessProb: 0.95,       // default success probability
+			Balance: balance,
         }
 
         // add channel to the graph
@@ -664,9 +669,10 @@ func SaveComprehensiveResults(results []Result, filename string) {
     fmt.Println("Comprehensive results saved to", filename)
 }
 
+// SimulatePathExecution simulates the execution of a path and checks if the amount can be sent
 func SimulatePathExecution(path []Channel, amount float64) bool {
 	for _, ch := range path {
-		if ch.Capacity < amount {
+		if ch.Balance < amount {
 			return false
 		}
 	}
