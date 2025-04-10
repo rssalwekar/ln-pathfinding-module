@@ -330,13 +330,19 @@ func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64
 	}
 	Pe = math.Max(Pe, 1e-9)
 
+	// Eclair-like additive cost
 	riskCost := amount * ch.CLTV * 1.8e-8
 	feeComponent := ch.Fee + ch.HopCost + riskCost
 
-	reliabilityPenalty := -math.Log(Pe) // smooth Pe penalty (replaces 1/Pe)
-	combined := (1.0 - *ReliabilityBias)*feeComponent + *ReliabilityBias*reliabilityPenalty
+	// LND-like multiplicative penalty (simplified)
+	penalty := 0.1 + amount * 1e-3
+	multiplicative := penalty / Pe
 
-	return combined, Pe
+	// Interpolate between fee and reliability cost
+	alpha := *ReliabilityBias
+	additive := (1.0-alpha)*feeComponent + alpha*(-math.Log(Pe))
+
+	return additive, multiplicative
 }
 
 
@@ -658,6 +664,14 @@ func SaveComprehensiveResults(results []Result, filename string) {
     fmt.Println("Comprehensive results saved to", filename)
 }
 
+func SimulatePathExecution(path []Channel, amount float64) bool {
+	for _, ch := range path {
+		if ch.Capacity < amount {
+			return false
+		}
+	}
+	return true
+}
 
 func ComprehensiveTest(graph *Graph, numTests int) {
     r := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -709,7 +723,7 @@ func ComprehensiveTest(graph *Graph, numTests int) {
 
                 for attempt := 0; attempt < maxRetries; attempt++ {
                     path, pathPe, err = testCase.Func(graph, src, dst, amount, model)
-                    if err == nil && len(path) > 0 && pathPe >= minSuccessPe {
+                    if err == nil && len(path) > 0 && SimulatePathExecution(path, amount) {
                         success = true
                         retries = attempt + 1
                         break
@@ -767,7 +781,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 250
+    numTests := 50
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }

@@ -36,12 +36,16 @@ plt.savefig("poster_fee_distribution.png")
 plt.close()
 
 # --- 3. Summary Table CSV ---
+success_df["FeePerSat"] = success_df["TotalFee"] / success_df["Amount"]
+
 summary = success_df.groupby("WeightFunction").agg({
     "TotalFee": "mean",
+    "FeePerSat": "mean",
     "PathPe": "mean",
     "Success": "count"
 }).rename(columns={
     "TotalFee": "AvgFee",
+    "FeePerSat": "AvgFeePerSat",
     "PathPe": "AvgPathPe",
     "Success": "NumSuccesses"
 })
@@ -54,16 +58,16 @@ summary.to_csv("summary_metrics_table.csv", index=False)
 # --- 4. Fee and Path Success Plot (Side-by-Side Bars) ---
 fig, ax1 = plt.subplots(figsize=(10, 6))
 
-bar = sns.barplot(data=summary, x="WeightFunction", y="AvgFee", ax=ax1, color="skyblue")
-ax1.set_ylabel("Average Fee (sats)", color="blue")
+bar = sns.barplot(data=summary, x="WeightFunction", y="AvgFeePerSat", ax=ax1, color="skyblue")
+ax1.set_ylabel("Average Fee / Amount", color="blue")
 ax1.tick_params(axis='y', labelcolor="blue")
 
-ax2 = ax1.twinx()
-line = sns.lineplot(data=summary, x="WeightFunction", y="AvgPathPe", ax=ax2, color="green", marker="o", linewidth=2)
-ax2.set_ylabel("Average Path Success Probability", color="green")
-ax2.tick_params(axis='y', labelcolor="green")
+# ax2 = ax1.twinx()
+# line = sns.lineplot(data=summary, x="WeightFunction", y="AvgPathPe", ax=ax2, color="green", marker="o", linewidth=2)
+# ax2.set_ylabel("Average Path Success Probability", color="green")
+# ax2.tick_params(axis='y', labelcolor="green")
 
-plt.title("Cost vs Reliability by Weight Function")
+plt.title("Fee Cost by Weight Function")
 plt.tight_layout()
-plt.savefig("poster_fee_vs_pe.png")
+plt.savefig("poster_fee.png")
 plt.close()
