@@ -238,8 +238,7 @@ func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel, amount f
     }
 
     additive := ch.Fee + (amount * ch.CLTV * 15e-9)
-    penalty := 100.0 + amount * 1000.0
-    penalty /= 1000 // msat to sats
+    penalty := 0.1 + amount * 1e-3
 
     multiplicative := penalty / (math.Max(currentProb * Pe, 1e-9))
 
@@ -468,17 +467,18 @@ func FindBestRoute(graph *Graph, start, end string, amount float64,
 				continue
 			}
 
-			var additive, multiplicative float64
+			var additive, multiplicative, newDist float64
 			if isLND {
 				currentProb := probMap[currentNode]
 				additive, multiplicative = LNDWeight(ch, currentProb, model, amount)
+				newDist = dist[currentNode] + additive + multiplicative
 			} else {
 				additive, multiplicative = weightFunc(ch, amount)
+				newDist = dist[currentNode] + additive
 			}
 
-			newDist := dist[currentNode] + additive
 			newProb := probMap[currentNode] * pe
-
+			
 			if newDist < dist[ch.ToNode] {
 				dist[ch.ToNode] = newDist
 				probMap[ch.ToNode] = newProb
