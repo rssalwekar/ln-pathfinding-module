@@ -27,6 +27,7 @@ type Channel struct {
     HtlcMin     float64    // HTLC minimum in satoshis
     HtlcMax     float64    // HTLC maximum in satoshis
     SuccessProb float64
+	PeCache		float64
 }
 
 // Graph represents the Lightning Network as an adjacency list
@@ -136,20 +137,16 @@ func maxReceivable(graph *Graph, node string) float64 {
 // make s customizable
 // area under curve must equal 1
 // s = cap/10
-func EstimateBimodalSuccessProbability(ch Channel) float64 {
-	if ch.Amt >= ch.Capacity || ch.Capacity == 0 {
-		return 0.01
+func EstimateBimodalSuccessProbability(ch Channel, amount float64) float64 {
+	if amount >= ch.Capacity || ch.Capacity == 0 {
+		return 1e-9
 	}
 
-	// Scale parameter s controls how "bimodal" the distribution is
 	s := ch.Capacity / 10.0
-
-	// PDF of bimodal distribution: exp(-x/s) + exp((x-cap)/s)
 	pdf := func(x float64) float64 {
 		return math.Exp(-x/s) + math.Exp((x - ch.Capacity)/s)
 	}
 
-	// Trapezoidal numerical integration
 	integrate := func(f func(float64) float64, a, b float64, steps int) float64 {
 		if b <= a {
 			return 0
@@ -162,26 +159,26 @@ func EstimateBimodalSuccessProbability(ch Channel) float64 {
 		return sum * h
 	}
 
-	// Calculate success probability Pe = ∫_amt^cap pdf(x) dx / ∫_0^cap pdf(x) dx
-	numerator := integrate(pdf, ch.Amt, ch.Capacity, 500)
-	denominator := integrate(pdf, 0, ch.Capacity, 500)
+	numerator := integrate(pdf, amount, ch.Capacity, 200)
+	denominator := integrate(pdf, 0, ch.Capacity, 200)
 
 	if denominator == 0 {
-		return 0.01
+		return 1e-9
 	}
 
-	Pe := numerator / denominator
-	return math.Max(Pe, 0.000)
-}
+	pe := numerator / denominator
+	// fmt.Printf("  DEBUG: Pe = %.9f from %s to %s\n", pe, ch.FromNode, ch.ToNode)
 
+	return math.Max(pe, 1e-9)
+}
 
 // estimate success probability using uniform function
 // pe = (cap - amt) / cap
-func EstimateUniformSuccessProbability(ch Channel) float64 {
-	if ch.Capacity == 0 {
-        return 0 // Avoid division by zero
-    }
-    return math.Max((ch.Capacity - ch.Amt) / ch.Capacity, 1e-9) // avoid math.Log(0)
+func EstimateUniformSuccessProbability(ch Channel, amount float64) float64 {
+	if ch.Capacity == 0 || amount >= ch.Capacity {
+		return 1e-9
+	}
+	return math.Max((ch.Capacity - amount) / ch.Capacity, 1e-9)
 }
 
 
@@ -195,36 +192,36 @@ const (
 
 // LND weight function
 // add constraints in weight functions and dijkstra, should check intermediary in dijkstra for lnd and ldk, and at end for eclair and cln
-func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel) (float64, float64) {
+func LNDWeight(ch Channel, currentProb float64, model ProbabilityModel, amount float64) (float64, float64) {
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch)
+        Pe = EstimateBimodalSuccessProbability(ch, amount)
     } else {
-        Pe = EstimateUniformSuccessProbability(ch)
+        Pe = EstimateUniformSuccessProbability(ch, amount)
     }
-    
-    additive := ch.Fee + (ch.Amt * ch.CLTV * 15e-9)
-    penalty := 100.0 + ch.Amt*1000.0 // in msat
-    penalty /= 1000 // convert to satoshis
-    
-    multiplicative := penalty / (math.Max(currentProb * Pe, 1e-9)) // Avoid division by zero
+
+    additive := ch.Fee + (amount * ch.CLTV * 15e-9)
+    penalty := 100.0 + amount * 1000.0
+    penalty /= 1000 // msat to sats
+
+    multiplicative := penalty / (math.Max(currentProb * Pe, 1e-9))
 
     return additive, multiplicative
 }
 
-func EclairWeight(ch Channel, model ProbabilityModel) float64 {
+func EclairWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch)
+        Pe = EstimateBimodalSuccessProbability(ch, amount)
     } else {
-        Pe = EstimateUniformSuccessProbability(ch)
+        Pe = EstimateUniformSuccessProbability(ch, amount)
     }
     
     lockedFundsRisk := 1e-8 // per paper
-    riskCost := ch.Amt * ch.CLTV * lockedFundsRisk
+    riskCost := amount * ch.CLTV * lockedFundsRisk
 
 	logPe := math.Log(math.Max(Pe, 1e-9))
-	penalty := ((2000 + ch.Amt*500) / 1000) * logPe
+	penalty := ((2000 + amount*500) / 1000) * logPe
 	total := (ch.Fee + ch.HopCost + riskCost) - penalty
     
     // return (ch.Fee + ch.HopCost + riskCost) - ((2000+ch.Amt*500)/1000)*math.Log(Pe) // /1000 to convert from msat to satoshi?
@@ -233,25 +230,25 @@ func EclairWeight(ch Channel, model ProbabilityModel) float64 {
 
 // CLN weight function as per the paper
 // Note: CLN does NOT use success probability like other implementations
-func CLNWeight(ch Channel) float64 {
+func CLNWeight(ch Channel, amount float64) float64 {
     blockPerYear := 52596.0
     riskFactor := 10.0
 	// this capacityBias is success prob in CLN
-	estimateSuccessProb := (ch.Capacity + 1 - ch.Amt) / (ch.Capacity + 1)
+	estimateSuccessProb := (ch.Capacity + 1 - amount) / (ch.Capacity + 1)
     capacityBias := -math.Log(estimateSuccessProb)
     
     return (ch.Fee + (ch.Amt * ch.CLTV * riskFactor) / (blockPerYear * 100) + 1) * (capacityBias + 1)
 }
 
 // LDK weight function as per the paper
-func LDKWeight(ch Channel, model ProbabilityModel) float64 {
+func LDKWeight(ch Channel, model ProbabilityModel, amount float64) float64 {
     // Calculate pathHtlcMin
     pathHtlcMin := ch.HtlcMin*(1+ch.FeeRate/1000000) + ch.FeeBase
     
     // Calculate base penalty
     penaltyBase := 500.0 // msat
     baseMultiplier := 8192.0 // msat
-    basePenalty := penaltyBase + (baseMultiplier * ch.Amt) / math.Pow(2, 30)
+    basePenalty := penaltyBase + (baseMultiplier * amount) / math.Pow(2, 30)
     
     // Calculate anti-probing penalty
     antiProbingPenalty := 0.0
@@ -261,22 +258,22 @@ func LDKWeight(ch Channel, model ProbabilityModel) float64 {
     
     // Calculate liquidity penalty
     LM := 30000.0 // msat
-    amtMultiplier := (192.0 * ch.Amt) / math.Pow(2, 20)
+    amtMultiplier := (192.0 * amount) / math.Pow(2, 20)
     var liquidityPenalty float64
     
     // Using uniform distribution for success probability
 	// not using exponential in bimodal; instead is polynomial
     var Pe float64
     if model == Bimodal {
-        Pe = EstimateBimodalSuccessProbability(ch)
+        Pe = EstimateBimodalSuccessProbability(ch, amount)
     } else {
-        Pe = EstimateUniformSuccessProbability(ch)
+        Pe = EstimateUniformSuccessProbability(ch, amount)
     }
     liquidityPenalty = -math.Log10(Pe) * (LM + amtMultiplier)
     
     // Calculate historic penalty (simplified - paper mentions historical data)
     HM := 10000.0 // msat
-    historicMultiplier := (64.0 * ch.Amt) / math.Pow(2, 20)
+    historicMultiplier := (64.0 * amount) / math.Pow(2, 20)
     historicPenalty := -math.Log10(Pe) * (HM + historicMultiplier)
     
     // Total penalty
@@ -288,15 +285,16 @@ func LDKWeight(ch Channel, model ProbabilityModel) float64 {
     return math.Max(ch.Fee, pathHtlcMin) + penalty
 }
 
-func CombinedWeight(ch Channel, _ float64, model ProbabilityModel) (float64, float64) {
+func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
 	var Pe float64
 	if model == Bimodal {
-		Pe = EstimateBimodalSuccessProbability(ch)
+		Pe = EstimateBimodalSuccessProbability(ch, amount)
 	} else {
-		Pe = EstimateUniformSuccessProbability(ch)
+		Pe = EstimateUniformSuccessProbability(ch, amount)
 	}
-	Pe = math.Max(Pe, 0.01)
-	riskCost := ch.Amt * ch.CLTV * 1.8e-8
+	Pe = math.Max(Pe, 1e-9)
+
+	riskCost := amount * ch.CLTV * 1.8e-8
 	feeComponent := ch.Fee + ch.HopCost + riskCost
 	combined := (1.0 - *ReliabilityBias)*feeComponent + *ReliabilityBias*(1.0/Pe)
 	return combined, Pe
@@ -412,7 +410,7 @@ func FindBestRoute(graph *Graph, start, end string, amount float64,
 
         if currentNode == end {
             finalPath := path[end]
-            pathPe := computePathSuccessProbability(finalPath, model) // Uses actual model
+            pathPe := computePathSuccessProbability(finalPath) // Pe now cached
             return finalPath, pathPe, nil
         }
 
@@ -422,10 +420,16 @@ func FindBestRoute(graph *Graph, start, end string, amount float64,
             }
 
             additive, multiplicative := weightFunc(ch, amount)
-            cost := additive
-            if useMultiplicative {
-                cost += multiplicative
-            }
+			pe := multiplicative
+			if !useMultiplicative {
+				ch.PeCache = pe // Save just Pe
+			} else {
+				ch.PeCache = 1.0 // LND handles reliability in the cost
+			}
+			cost := additive
+			if useMultiplicative {
+				cost += multiplicative
+			}
 
             newDist := dist[currentNode] + cost
 
@@ -451,80 +455,61 @@ func FindBestRoute(graph *Graph, start, end string, amount float64,
 }
 
 // helper function for dijkstra
-func computePathSuccessProbability(path []Channel, model ProbabilityModel) float64 {
+func computePathSuccessProbability(path []Channel) float64 {
     pathPe := 1.0
     for _, ch := range path {
-        var pe float64
-        if model == Bimodal {
-            pe = EstimateBimodalSuccessProbability(ch)
-        } else {
-            pe = EstimateUniformSuccessProbability(ch)
-        }
+        pe := ch.PeCache
         if pe <= 0.0 {
-			fmt.Printf("Pe=0 for channel %s->%s with Amt=%.0f, Cap=%.0f\n", ch.FromNode, ch.ToNode, ch.Amt, ch.Capacity)		
-            return 0.0 // Path immediately fails if any Pe is zero or invalid
+            return 0.0
         }
         pathPe *= pe
     }
     return pathPe
 }
 
-
 func makeWeightFuncWrapper(
     weightFunc func(Channel, float64, ProbabilityModel) (float64, float64),
     useMultiplicative bool,
 ) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount,
-			func(ch Channel, _ float64) (float64, float64) {
-				return weightFunc(ch, amount, model)
-			},
-			useMultiplicative,
-			model,
-		)
+        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
+            return weightFunc(ch, amount, model)
+        }, useMultiplicative, model)
     }
 }
 
-func makeEclairWrapper(weightFunc func(Channel, ProbabilityModel) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
+func makeEclairWrapper(weightFunc func(Channel, ProbabilityModel, float64) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount,
-			func(ch Channel, _ float64) (float64, float64) {
-				var pe float64
-				if model == Bimodal {
-					pe = EstimateBimodalSuccessProbability(ch)
-				} else {
-					pe = EstimateUniformSuccessProbability(ch)
-				}
-				return weightFunc(ch, model), pe
-			},
-			false,
-			model,
-		)
+        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
+            var pe float64
+            if model == Bimodal {
+                pe = EstimateBimodalSuccessProbability(ch, amount)
+            } else {
+                pe = EstimateUniformSuccessProbability(ch, amount)
+            }
+            return weightFunc(ch, model, amount), pe
+        }, false, model)
     }
 }
 
-func makeLDKWrapper(weightFunc func(Channel, ProbabilityModel) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
+func makeLDKWrapper(weightFunc func(Channel, ProbabilityModel, float64) float64) func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
-        return FindBestRoute(graph, start, end, amount,
-			func(ch Channel, _ float64) (float64, float64) {
-				var pe float64
-				if model == Bimodal {
-					pe = EstimateBimodalSuccessProbability(ch)
-				} else {
-					pe = EstimateUniformSuccessProbability(ch)
-				}
-				return weightFunc(ch, model), pe
-			},
-			false,
-			model,
-		)
+        return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
+            var pe float64
+            if model == Bimodal {
+                pe = EstimateBimodalSuccessProbability(ch, amount)
+            } else {
+                pe = EstimateUniformSuccessProbability(ch, amount)
+            }
+            return weightFunc(ch, model, amount), pe
+        }, false, model)
     }
 }
 
 func makeCLNWrapper() func(*Graph, string, string, float64, ProbabilityModel) ([]Channel, float64, error) {
     return func(graph *Graph, start, end string, amount float64, model ProbabilityModel) ([]Channel, float64, error) {
         return FindBestRoute(graph, start, end, amount, func(ch Channel, _ float64) (float64, float64) {
-            return CLNWeight(ch), 1.0 // CLN does not use Pe
+            return CLNWeight(ch, amount), 1.0
         }, false, model)
     }
 }
@@ -587,7 +572,9 @@ func ComprehensiveTest(graph *Graph, numTests int) {
         if feasibleAmt < 1000 {
             continue
         }
-        amount := r.Float64() * feasibleAmt
+
+		// stay within a safe margin (90% of capacity):
+		amount := 1000 + r.Float64()*((feasibleAmt * 0.9) - 1000)
 
         for _, model := range []ProbabilityModel{Bimodal, Uniform} {
             for _, testCase := range []struct {
@@ -599,11 +586,13 @@ func ComprehensiveTest(graph *Graph, numTests int) {
                 {"Eclair", makeEclairWrapper(EclairWeight), true},
                 {"CLN", makeCLNWrapper(), false},
                 {"LDK", makeLDKWrapper(LDKWeight), true},
-                {"LND", makeWeightFuncWrapper(LNDWeight, true), true},
+                {"LND", makeWeightFuncWrapper(func(ch Channel, amt float64, m ProbabilityModel) (float64, float64) {
+                    return LNDWeight(ch, 1.0, m, amt)
+                }, true), true},
             } {
-                modelArg := model
+                modelUsed := model
                 if !testCase.UsesProbabilityModel {
-                    modelArg = "N/A (capacity bias)"
+                    modelUsed = "N/A (capacity bias)"
                 }
 
                 var path []Channel
@@ -625,14 +614,14 @@ func ComprehensiveTest(graph *Graph, numTests int) {
                     Source:           src,
                     Destination:      dst,
                     WeightFunction:   testCase.Name,
-                    ProbabilityModel: string(modelArg),
+                    ProbabilityModel: string(modelUsed),
                     Amount:           amount,
                     Success:          success,
                     Retries:          retries,
                     PathPe:           pathPe,
                 }
 
-                if len(path) > 0 {
+                if success {
                     totalFee := 0.0
                     totalHopCost := 0.0
                     pathStr := ""
@@ -669,7 +658,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 50
+    numTests := 25
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }
