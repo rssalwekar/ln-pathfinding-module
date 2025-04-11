@@ -13,15 +13,16 @@ success_df.loc[:, "FeePerSat"] = success_df["TotalFee"] / success_df["Amount"]
 
 summary = success_df.groupby("WeightFunction").agg({
     "TotalFee": "mean",
-    "FeePerSat": "mean",
+    "FeePerSat": "median",  # Use median for FeePerSat
     "PathPe": "mean",
     "Success": "count"
 }).rename(columns={
     "TotalFee": "AvgFee",
-    "FeePerSat": "AvgFeePerSat",
+    "FeePerSat": "MedianFeePerSat",
     "PathPe": "AvgPathPe",
     "Success": "NumSuccesses"
 })
+
 
 # --- 1. Success Rate Bar Plot ---
 plt.figure(figsize=(8, 5))
@@ -59,8 +60,8 @@ summary.to_csv("summary_metrics_table.csv", index=False)
 # --- 4. Fee and Path Success Plot (Fee Only) ---
 fig, ax1 = plt.subplots(figsize=(10, 6))
 
-sns.barplot(data=summary, x="WeightFunction", y="AvgFeePerSat", ax=ax1, color="skyblue")
-ax1.set_ylabel("Average Fee / Amount", color="blue")
+sns.barplot(data=summary, x="WeightFunction", y="MedianFeePerSat", ax=ax1, color="skyblue")
+ax1.set_ylabel("Median Fee / Amount", color="blue")
 ax1.tick_params(axis='y', labelcolor="blue")
 ax2 = ax1.twinx()
 line = sns.lineplot(data=summary, x="WeightFunction", y="AvgPathPe", ax=ax2, color="green", marker="o", linewidth=2)
