@@ -18,3 +18,9 @@ vendor/
 /go/
 *.mod
 *.sum
+
+# Other folder
+/other/
+
+# Ignore pathfinding strategies paper
+/Pathfinding Strategies Paper.pdf

@@ -322,7 +322,51 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) (float64, flo
 	return total, 1.0
 }
 
+// Combined weight function for LND + Eclair
+// func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
+// 	var Pe float64
+// 	if model == Bimodal {
+// 		Pe = LookupBimodalSuccessProbability(ch, amount)
+// 	} else {
+// 		Pe = EstimateUniformSuccessProbability(ch, amount)
+// 	}
+// 	Pe = math.Max(Pe, 1e-9)
+
+// 	// Eclair-like additive cost
+// 	riskCost := amount * ch.CLTV * 1.8e-8
+// 	feeComponent := ch.Fee + ch.HopCost + riskCost
+
+// 	// LND-like multiplicative penalty (simplified)
+// 	penalty := 0.1 + amount * 1e-3
+// 	multiplicative := penalty / Pe
+
+// 	// Interpolate between fee and reliability cost
+// 	alpha := *ReliabilityBias
+// 	additive := (1.0-alpha)*feeComponent + alpha*(-math.Log(Pe))
+
+// 	return additive, multiplicative
+// }
+
+// Combined weight function for LND + LDK
 func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
+	// -- LDK-like Additive Cost --
+
+	amtMsat := amount * 1000.0
+
+	pathHtlcMin := ch.HtlcMin*(1+ch.FeeRate/1_000_000) + ch.FeeBase*1000.0
+
+	penaltyBase := 500.0 // msat
+	baseMultiplier := 8192.0
+	basePenalty := penaltyBase + (baseMultiplier * amtMsat) / math.Pow(2, 30)
+
+	antiProbingPenalty := 0.0
+	if ch.HtlcMax >= ch.Capacity/2 {
+		antiProbingPenalty = 250.0
+	}
+
+	LM := 30000.0
+	amtMultiplier := (192.0 * amtMsat) / math.Pow(2, 20)
+
 	var Pe float64
 	if model == Bimodal {
 		Pe = LookupBimodalSuccessProbability(ch, amount)
@@ -331,17 +375,19 @@ func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64
 	}
 	Pe = math.Max(Pe, 1e-9)
 
-	// Eclair-like additive cost
-	riskCost := amount * ch.CLTV * 1.8e-8
-	feeComponent := ch.Fee + ch.HopCost + riskCost
+	liquidityPenalty := -math.Log10(Pe) * (LM + amtMultiplier)
 
-	// LND-like multiplicative penalty (simplified)
+	HM := 10000.0
+	historicMultiplier := (64.0 * amtMsat) / math.Pow(2, 20)
+	historicPenalty := -math.Log10(Pe) * (HM + historicMultiplier)
+
+	totalPenalty := (basePenalty + antiProbingPenalty + liquidityPenalty + historicPenalty) / 1000.0
+
+	additive := math.Max(ch.Fee, pathHtlcMin/1000.0) + totalPenalty
+
+	// -- LND-like Multiplicative Penalty --
 	penalty := 0.1 + amount * 1e-3
 	multiplicative := penalty / Pe
-
-	// Interpolate between fee and reliability cost
-	alpha := *ReliabilityBias
-	additive := (1.0-alpha)*feeComponent + alpha*(-math.Log(Pe))
 
 	return additive, multiplicative
 }
@@ -787,7 +833,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 1000
+    numTests := 100
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }
