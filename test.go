@@ -3,7 +3,6 @@ package main
 import (
 	"container/heap"
 	"encoding/csv"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -35,9 +34,6 @@ type Channel struct {
 type Graph struct {
 	Nodes map[string][]Channel
 }
-
-// User preference flag: 0.0 = minimize cost, 1.0 = maximize reliability
-var ReliabilityBias = flag.Float64("reliability", 0.8, "Preference for reliability: 0=low fee, 1=high reliability")
 
 // Result struct includes success, path, fee, reliability, etc.
 type Result struct {
@@ -322,6 +318,9 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) (float64, flo
 	return total, 1.0
 }
 
+// Combined weight function for LND + LDK
+var ReliabilityBias = 0.5 // Can be tuned by the user
+
 // Combined weight function for LND + Eclair
 // func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
 // 	var Pe float64
@@ -347,10 +346,8 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) (float64, flo
 // 	return additive, multiplicative
 // }
 
-// Combined weight function for LND + LDK
 func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
-	// -- LDK-like Additive Cost --
-
+	// --- LDK-style Additive Cost ---
 	amtMsat := amount * 1000.0
 
 	pathHtlcMin := ch.HtlcMin*(1+ch.FeeRate/1_000_000) + ch.FeeBase*1000.0
@@ -381,15 +378,19 @@ func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64
 	historicMultiplier := (64.0 * amtMsat) / math.Pow(2, 20)
 	historicPenalty := -math.Log10(Pe) * (HM + historicMultiplier)
 
-	totalPenalty := (basePenalty + antiProbingPenalty + liquidityPenalty + historicPenalty) / 1000.0
+	additiveCost := (basePenalty + antiProbingPenalty + liquidityPenalty + historicPenalty) / 1000.0
+	additive := math.Max(ch.Fee, pathHtlcMin/1000.0) + additiveCost
 
-	additive := math.Max(ch.Fee, pathHtlcMin/1000.0) + totalPenalty
+	// --- LND-style Multiplicative Cost ---
+	lndPenalty := 0.1 + amount*1e-3
+	multiplicative := lndPenalty / Pe
 
-	// -- LND-like Multiplicative Penalty --
-	penalty := 0.1 + amount * 1e-3
-	multiplicative := penalty / Pe
+	// --- Blend using ReliabilityBias ---
+	// Higher bias → more weight on reliability (multiplicative), lower bias → prioritize fees
+	finalAdditive := (1 - ReliabilityBias) * additive
+	finalMultiplicative := ReliabilityBias * multiplicative
 
-	return additive, multiplicative
+	return finalAdditive, finalMultiplicative
 }
 
 
@@ -833,7 +834,7 @@ func main() {
     fmt.Printf("Loaded network with %d nodes\n", len(graph.Nodes))
     fmt.Println("Running tests...")
 
-    numTests := 100
+    numTests := 500
     ComprehensiveTest(graph, numTests)
     fmt.Println("Tests completed")
 }
