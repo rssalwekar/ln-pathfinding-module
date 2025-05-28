@@ -319,7 +319,7 @@ func LDKWeight(ch Channel, model ProbabilityModel, amount float64) (float64, flo
 }
 
 // Combined weight function for LND + LDK
-var ReliabilityBias = 0.5 // Can be tuned by the user
+var ReliabilityBias = 0.5 // Controls tradeoff: 0 = prioritize fees (LDK-like), 1 = prioritize reliability (LND-like)
 
 // Combined weight function for LND + Eclair
 // func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
@@ -347,46 +347,53 @@ var ReliabilityBias = 0.5 // Can be tuned by the user
 // }
 
 func CombinedWeight(ch Channel, amount float64, model ProbabilityModel) (float64, float64) {
-	// --- LDK-style Additive Cost ---
+	// Convert amount from sats to msats (used in LDK's model)
 	amtMsat := amount * 1000.0
 
+	// Estimate path HTLC minimum forwarding cost (used in LDK to avoid spammy routes)
 	pathHtlcMin := ch.HtlcMin*(1+ch.FeeRate/1_000_000) + ch.FeeBase*1000.0
 
-	penaltyBase := 500.0 // msat
-	baseMultiplier := 8192.0
+	// Base routing penalty (from LDK)
+	penaltyBase := 500.0     // msat
+	baseMultiplier := 8192.0 // msat
 	basePenalty := penaltyBase + (baseMultiplier * amtMsat) / math.Pow(2, 30)
 
+	// Anti-probing penalty: LDK penalizes channels with high HTLC max (to avoid probing)
 	antiProbingPenalty := 0.0
 	if ch.HtlcMax >= ch.Capacity/2 {
-		antiProbingPenalty = 250.0
+		antiProbingPenalty = 250.0 // msat
 	}
 
-	LM := 30000.0
+	// LDK liquidity penalty computation based on success probability
+	LM := 30000.0 
 	amtMultiplier := (192.0 * amtMsat) / math.Pow(2, 20)
 
+	// Estimate per-channel success probability (Pe), from bimodal or uniform model
 	var Pe float64
 	if model == Bimodal {
 		Pe = LookupBimodalSuccessProbability(ch, amount)
 	} else {
 		Pe = EstimateUniformSuccessProbability(ch, amount)
 	}
-	Pe = math.Max(Pe, 1e-9)
+	Pe = math.Max(Pe, 1e-9) // avoid log(0)
 
+	// Liquidity-based penalty (LDK)
 	liquidityPenalty := -math.Log10(Pe) * (LM + amtMultiplier)
 
+	// Historic penalty to reflect potential prior failure trends (also LDK)
 	HM := 10000.0
 	historicMultiplier := (64.0 * amtMsat) / math.Pow(2, 20)
 	historicPenalty := -math.Log10(Pe) * (HM + historicMultiplier)
 
+	// Aggregate additive cost (in sats)
 	additiveCost := (basePenalty + antiProbingPenalty + liquidityPenalty + historicPenalty) / 1000.0
 	additive := math.Max(ch.Fee, pathHtlcMin/1000.0) + additiveCost
 
-	// --- LND-style Multiplicative Cost ---
-	lndPenalty := 0.1 + amount*1e-3
+	// LND-style multiplicative cost: reliability penalty scaled inversely with Pe
+	lndPenalty := 0.1 + amount*1e-3 // LND heuristic penalty based on amount
 	multiplicative := lndPenalty / Pe
 
-	// --- Blend using ReliabilityBias ---
-	// Higher bias → more weight on reliability (multiplicative), lower bias → prioritize fees
+	// Blend the two strategies using the user-defined ReliabilityBias
 	finalAdditive := (1 - ReliabilityBias) * additive
 	finalMultiplicative := ReliabilityBias * multiplicative
 
